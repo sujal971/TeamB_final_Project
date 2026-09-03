@@ -48,14 +48,14 @@ def ensure_database():
         msg = (
             "Unable to connect to MySQL while ensuring the database exists. "
             "Please ensure MySQL is running and the connection environment variables are set. "
-            f"(host={cfg['host']} port={cfg['port']} user={cfg['user']} db={cfg['database']}) "
+            f"(host={cfg['host']} port={cfg['user']} db={cfg['database']}) "
         )
 
         if getattr(exc, 'errno', None) == errorcode.ER_ACCESS_DENIED_ERROR:
             msg += (
                 "Access denied indicates the provided username/password is invalid. "
                 "Set MYSQL_USER and MYSQL_PASSWORD environment variables to the correct values. "
-            )
+                )
         raise RuntimeError(f"{msg}Underlying error: {exc}") from exc
     try:
         cursor = conn.cursor()
@@ -77,6 +77,6 @@ def get_connection():
         raise RuntimeError(
             "Unable to connect to MySQL. "
             "Please ensure MySQL is running and the connection environment variables are set. "
-            f"(host={cfg['host']} port={cfg['port']} user={cfg['user']} db={cfg['database']}) "
+            f"(host={cfg['host']} port={cfg['user']} db={cfg['database']}) "
             f"Underlying error: {exc}"
         ) from exc 

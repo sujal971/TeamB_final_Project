@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 from groq import Groq
 
 import pdfplumber
+import pandas as pd
 import plotly.express as px
 import streamlit as st
 from docx import Document
@@ -21,6 +22,22 @@ load_dotenv()
 
 # Initialize Groq client
 client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+
+def _resolve_groq_model():
+    configured = os.environ.get("GROQ_MODEL")
+    if configured:
+        return configured
+    candidates = ["llama-3.1-8b-instant", "qwen/qwen3.8-27b", "openai/gpt-oss-20b", "groq/compound-mini"]
+    try:
+        available = {m.id for m in client.models.list().data}
+        for cand in candidates:
+            if cand in available:
+                return cand
+    except Exception:
+        pass
+    return "qwen/qwen3.8-27b"
+
+GROQ_MODEL = _resolve_groq_model()
 try:
     import pytesseract
 except ImportError:
@@ -309,7 +326,7 @@ def generate_quiz(text, question_count, difficulty, question_type):
         for attempt in range(max_retries):
             try:
                 response = client.chat.completions.create(
-                    model="llama-3.1-8b-instant",
+                    model=GROQ_MODEL,
                     messages=[
                         {"role": "system", "content": "You are a helpful assistant designed to output strict JSON."},
                         {"role": "user", "content": prompt}
@@ -318,7 +335,11 @@ def generate_quiz(text, question_count, difficulty, question_type):
                     temperature=0.3 
                 )
                 
-                result_json = json.loads(response.choices[0].message.content)
+                raw_text = response.choices[0].message.content.strip()
+                if raw_text.startswith("```"):
+                    raw_text = re.sub(r"^```(?:json)?\s*", "", raw_text)
+                    raw_text = re.sub(r"\s*```$", "", raw_text)
+                result_json = json.loads(raw_text)
                 chunk_questions = result_json.get("questions", [])
                 all_questions.extend(chunk_questions)
                 
@@ -353,12 +374,16 @@ def evaluate_short_answer(question, correct_answer, user_answer):
     """
     try:
         response = client.chat.completions.create(
-            model="llama-3.1-8b-instant", # Smaller, faster model is fine for grading
+            model=GROQ_MODEL, # Groq model for grading
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"},
             temperature=0.1
         )
-        return json.loads(response.choices[0].message.content)
+        raw_text = response.choices[0].message.content.strip()
+        if raw_text.startswith("```"):
+            raw_text = re.sub(r"^```(?:json)?\s*", "", raw_text)
+            raw_text = re.sub(r"\s*```$", "", raw_text)
+        return json.loads(raw_text)
     except Exception as e:
         return {"is_correct": False, "feedback": f"Evaluation error: {str(e)}"}
     
@@ -433,6 +458,29 @@ if "landing_done" not in st.session_state:
 
 if "auth_mode_choice" not in st.session_state:
     st.session_state.auth_mode_choice = "Login"
+
+if "quiz_mode" not in st.session_state:
+    st.session_state.quiz_mode = "Exam Mode"
+
+if "quiz_start_time" not in st.session_state:
+    st.session_state.quiz_start_time = None
+
+if "last_result" not in st.session_state:
+    st.session_state.last_result = None
+
+if "preset_text" not in st.session_state:
+    st.session_state.preset_text = ""
+
+if "preset_count" not in st.session_state:
+    st.session_state.preset_count = 5
+
+if "preset_diff" not in st.session_state:
+    st.session_state.preset_diff = "Easy"
+
+if "preset_type" not in st.session_state:
+    st.session_state.preset_type = "Multiple Choice Questions (MCQ)"
+
+
 
 st.markdown(
     """
@@ -830,6 +878,102 @@ st.markdown(
             padding: 0.2rem 0.65rem;
         }
 
+        /* Quiz Specific Option Cards (Kahoot / Quizizz Style) */
+        .quiz-options-box [data-testid="stRadio"] [role="radiogroup"] {
+            display: flex !important;
+            flex-direction: column !important;
+            gap: 12px !important;
+            width: 100% !important;
+        }
+
+        .quiz-options-box [data-testid="stRadio"] [role="radiogroup"] > label {
+            display: flex !important;
+            align-items: center !important;
+            width: 100% !important;
+            background: #ffffff !important;
+            border: 2px solid #e2e8f0 !important;
+            border-radius: 16px !important;
+            padding: 16px 22px !important;
+            font-size: 1.05rem !important;
+            font-weight: 600 !important;
+            color: #1e293b !important;
+            cursor: pointer !important;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.03) !important;
+            transition: all 0.22s cubic-bezier(0.4, 0, 0.2, 1) !important;
+        }
+
+        .quiz-options-box [data-testid="stRadio"] [role="radiogroup"] > label:hover {
+            border-color: #006d77 !important;
+            background: #f0fdfa !important;
+            transform: translateY(-2px) translateX(4px) !important;
+            box-shadow: 0 8px 20px rgba(0, 109, 119, 0.15) !important;
+        }
+
+        /* Question Stepper styling */
+        .stepper-row [data-testid="stButton"] button {
+            border-radius: 999px !important;
+            font-weight: 700 !important;
+            font-size: 0.88rem !important;
+            padding: 6px 10px !important;
+            min-height: 38px !important;
+            box-shadow: none !important;
+        }
+
+        /* Quiz HUD */
+        .quiz-hud {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: linear-gradient(135deg, rgba(0, 109, 119, 0.08), rgba(10, 147, 150, 0.08));
+            border: 1px solid rgba(0, 109, 119, 0.15);
+            border-radius: 16px;
+            padding: 14px 22px;
+            margin-bottom: 22px;
+        }
+
+        .hud-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            background: #ffffff;
+            border: 1px solid #cbd5e1;
+            border-radius: 20px;
+            padding: 6px 14px;
+            font-weight: 700;
+            font-size: 0.88rem;
+            color: #0f172a;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.04);
+        }
+
+        /* Result Screen Cards */
+        .metric-badge-card {
+            background: white;
+            border: 1px solid #e2e8f0;
+            border-radius: 18px;
+            padding: 20px;
+            text-align: center;
+            box-shadow: 0 4px 18px rgba(0,0,0,0.04);
+            transition: transform 0.2s ease, box-shadow 0.2s ease;
+        }
+        .metric-badge-card:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 10px 25px rgba(0,0,0,0.08);
+        }
+        .metric-badge-card .metric-val {
+            font-size: 2.2rem;
+            font-weight: 800;
+            color: #006d77;
+            font-family: 'Fraunces', serif;
+            margin-bottom: 4px;
+        }
+        .metric-badge-card .metric-lbl {
+            font-size: 0.82rem;
+            text-transform: uppercase;
+            letter-spacing: 1.2px;
+            color: #64748b;
+            font-weight: 700;
+        }
+
         @media (max-width: 1080px) {
             .main .block-container {
                 border-radius: 14px;
@@ -906,6 +1050,8 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+
 
 
 
@@ -1129,50 +1275,88 @@ if st.session_state.auth_user is None:
         
         st.stop()
 
-    # If landing is done, show the actual Login/Register form
-    if st.button("← Back to Home", use_container_width=False):
-        st.session_state.landing_done = False
-        st.rerun()
     # Re-using the existing logic but respecting the choice
     auth_mode = st.radio("Access Mode", ["Login", "Register"], 
                          index=0 if st.session_state.auth_mode_choice == "Login" else 1,
                          horizontal=True, label_visibility="collapsed")
+
+    # ---------------------------------------------------------
+    # INTERACTIVE AUTH SECTION
+    # ---------------------------------------------------------
+    st.markdown(f"""
+        <div style='text-align: center; padding: 2rem 0;'>
+            <h2 style='font-family: "Fraunces", serif; font-size: 2.5rem; color: var(--brand); margin-bottom: 0.5rem;'>
+                { "Welcome Back!" if auth_mode == "Login" else "Join the Elite" }
+            </h2>
+            <p style='color: var(--muted); font-size: 1.1rem;'>
+                { "Please sign in to access your customized learning dashboard." if auth_mode == "Login" else "Create your account to start generating AI-powered quizzes." }
+            </p>
+        </div>
+    """, unsafe_allow_html=True)
+
+    auth_col1, auth_col2, auth_col3 = st.columns([1, 2, 1])
     
-    if auth_mode == "Login":
-        with st.form("login_form", clear_on_submit=False):
-            login_username = st.text_input("Username", key="login_username")
-            login_password = st.text_input("Password", type="password", key="login_password")
-            login_submit = st.form_submit_button("Login", use_container_width=True)
-            if login_submit:
-                ok, db_username = authenticate_user(login_username, login_password)
-                if ok:
-                    st.session_state.auth_user = db_username
-                    st.success("Login successful.")
-                    st.rerun()
-                else:
-                    st.error("Invalid username or password.")
-    else:
-        with st.form("register_form", clear_on_submit=False):
-            st.subheader("Create New Account")
-            reg_username = st.text_input("Username", key="register_username")
-            reg_password = st.text_input("Password", type="password", key="register_password")
-            reg_confirm = st.text_input("Confirm Password", type="password", key="register_confirm")
-            
-            register_submit = st.form_submit_button("Register", use_container_width=True)
-            
-            if register_submit:
-                if reg_password != reg_confirm:
-                    st.error("Passwords do not match.")
-                elif not reg_username.strip():
-                    st.error("Username cannot be empty.")
-                else:
-                    ok, message = register_user(reg_username, reg_password, None)
+    with auth_col2:
+        st.markdown(f"""
+            <div style='background: white; padding: 30px; border-radius: 24px; box-shadow: 0 20px 50px rgba(0,0,0,0.05); border: 1px solid var(--line);'>
+                <div style='display: flex; justify-content: space-between; align-items: center; margin-bottom: 25px;'>
+                    <div style='height: 2px; flex: 1; background: { "var(--brand)" if auth_mode == "Login" else "#eee" };'></div>
+                    <div style='padding: 0 15px; font-weight: 800; font-size: 0.75rem; letter-spacing: 2px; color: { "var(--brand)" if auth_mode == "Login" else "#aaa" };'>SECURE LOGIN</div>
+                    <div style='height: 2px; flex: 1; background: { "var(--brand)" if auth_mode == "Login" else "#eee" };'></div>
+                </div>
+        """, unsafe_allow_html=True)
+
+        if auth_mode == "Login":
+            with st.form("login_form", clear_on_submit=False):
+                login_username = st.text_input("Username", key="login_username", placeholder="Enter your username")
+                login_password = st.text_input("Password", type="password", key="login_password", placeholder="••••••••")
+                st.markdown("<div style='height: 15px;'></div>", unsafe_allow_html=True)
+                login_submit = st.form_submit_button("Launch Dashboard 🚀", use_container_width=True)
+                if login_submit:
+                    ok, db_username = authenticate_user(login_username, login_password)
                     if ok:
-                        st.success("Registration successful! You can now log in.")
-                        st.session_state.auth_mode_choice = "Login"
+                        st.session_state.auth_user = db_username
+                        st.success("Access Granted. Redirecting...")
+                        time.sleep(1)
                         st.rerun()
                     else:
-                        st.error(message)
+                        st.error("Access Denied: Invalid credentials.")
+        else:
+            with st.form("register_form", clear_on_submit=False):
+                reg_username = st.text_input("Username", key="register_username", placeholder="Choose a unique name")
+                reg_password = st.text_input("Password", type="password", key="register_password", placeholder="••••••••")
+                reg_confirm = st.text_input("Confirm Password", type="password", key="register_confirm", placeholder="Confirm your password")
+                st.markdown("<div style='height: 15px;'></div>", unsafe_allow_html=True)
+                register_submit = st.form_submit_button("Initialize Account ✨", use_container_width=True)
+                
+                if register_submit:
+                    if reg_password != reg_confirm:
+                        st.error("Passwords do not match.")
+                    elif not reg_username.strip():
+                        st.error("Username is mandatory.")
+                    else:
+                        ok, message = register_user(reg_username, reg_password, None)
+                        if ok:
+                            st.balloons()
+                            st.success("Account Created! You can now log in.")
+                            st.session_state.auth_mode_choice = "Login"
+                            time.sleep(2)
+                            st.rerun()
+                        else:
+                            st.error(message)
+        
+        st.markdown("</div>", unsafe_allow_html=True)
+        
+        st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
+        if st.button("⚡ Quick Play as Guest", use_container_width=True):
+            st.session_state.auth_user = "Guest Scholar"
+            st.session_state.landing_done = True
+            st.rerun()
+
+        st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+        if st.button("← Return to Homepage", use_container_width=True, type="secondary"):
+            st.session_state.landing_done = False
+            st.rerun()
 
     # 🚀 Interactive Feature Showcase
     st.divider()
@@ -1204,6 +1388,7 @@ if st.session_state.auth_user is None:
         """, unsafe_allow_html=True)
 
     st.stop()
+
 
 if "menu_selection" not in st.session_state:
     st.session_state.menu_selection = "Home"
@@ -1240,6 +1425,7 @@ menu = st.session_state.menu_selection
 candidate = st.session_state.auth_user
 history = load_attempts(limit=200, user_name=candidate)
 
+
 with st.sidebar:
     st.markdown(f"**Logged in as:** <span class='user-pill'>{candidate}</span>", unsafe_allow_html=True)
     if st.button("Logout", use_container_width=True):
@@ -1247,6 +1433,7 @@ with st.sidebar:
         st.session_state.answers = {}
         st.session_state.landing_done = False
         st.rerun()
+
     st.markdown("### Performance Snapshot")
     tests_taken = history.get("tests_taken", 0)
     if history.get("percentages"):
@@ -1335,14 +1522,47 @@ elif menu == "Generate Quiz":
         <p style='color: var(--muted); font-size: 1rem; margin-bottom: 2rem;'>Transform your study notes, documents, or media into a custom-tailored quiz.</p>
     """, unsafe_allow_html=True)
     
-    st.markdown("### 📥 Choose Input Mode")
+    st.markdown("### ⚡ Quick Start: Pick a Demo Topic")
+    st.caption("Select any preset below to automatically fill rich content and quiz settings:")
+    preset_cols = st.columns(4)
+    presets = {
+        "🐍 Python Core": {
+            "text": "Python is a high-level, interpreted programming language created by Guido van Rossum in 1991. It emphasizes code readability with notable use of significant indentation. Python features dynamic typing, automatic memory management via garbage collection, and comprehensive built-in data structures including lists, tuples, sets, and dictionaries. Python supports multiple paradigms including object-oriented, procedural, and functional programming. Functions are first-class objects, and exceptions are handled via try-except-finally blocks.",
+            "count": 5, "diff": "Easy", "type": "Multiple Choice Questions (MCQ)"
+        },
+        "🤖 AI & ML": {
+            "text": "Artificial Intelligence is the simulation of human intelligence processes by computer systems. Machine learning is a core subset of AI where models learn patterns from training data without being explicitly programmed. Supervised learning algorithms learn from labeled input-output pairs to solve classification and regression problems. Unsupervised learning analyzes unlabeled datasets to discover intrinsic groupings, such as K-Means clustering. Deep learning leverages multi-layered neural networks inspired by biological neurons.",
+            "count": 5, "diff": "Medium", "type": "Multiple Choice Questions (MCQ)"
+        },
+        "🌍 World Capitals": {
+            "text": "World geography spans seven continents with over 190 recognized sovereign nations. The capital of France is Paris, globally celebrated for art, culture, and the Eiffel Tower. Tokyo is the capital of Japan, renowned as the world's most populous metropolitan area. Canberra serves as the purpose-built federal capital of Australia, situated between Sydney and Melbourne. Cairo is Egypt's ancient and vibrant capital on the Nile River. Ottawa is the capital city of Canada located in Ontario.",
+            "count": 5, "diff": "Easy", "type": "Multiple Choice Questions (MCQ)"
+        },
+        "🔬 Cell Biology": {
+            "text": "The cell is the basic structural, functional, and biological unit of all known organisms. Cells are classified into prokaryotic and eukaryotic cells. Eukaryotic cells possess a distinct membrane-bound nucleus that encloses deoxyribonucleic acid (DNA). Mitochondria are organelles responsible for cellular respiration, generating chemical energy in the form of ATP. Ribosomes synthesize proteins, while plant cells contain chloroplasts that carry out photosynthesis using chlorophyll pigments.",
+            "count": 5, "diff": "Medium", "type": "Multiple Choice Questions (MCQ)"
+        }
+    }
+
+    for col, (p_name, p_data) in zip(preset_cols, presets.items()):
+        with col:
+            if st.button(p_name, use_container_width=True):
+                st.session_state.input_mode_choice = "Paste Text"
+                st.session_state.preset_text = p_data["text"]
+                st.session_state.preset_count = p_data["count"]
+                st.session_state.preset_diff = p_data["diff"]
+                st.session_state.preset_type = p_data["type"]
+                st.rerun()
+
+    st.markdown("<div style='height: 15px;'></div>", unsafe_allow_html=True)
+    st.markdown("### 📥 Or Choose Custom Input Mode")
     
     # Styled Input Selection
     input_mode_col1, input_mode_col2 = st.columns(2)
     
     # We use session state to track the mode because we want custom buttons
     if "input_mode_choice" not in st.session_state:
-        st.session_state.input_mode_choice = "Upload File"
+        st.session_state.input_mode_choice = "Paste Text"
 
     with input_mode_col1:
         is_pasted = st.session_state.input_mode_choice == "Paste Text"
@@ -1381,7 +1601,8 @@ elif menu == "Generate Quiz":
             st.markdown("#### 📝 Edit Your Content")
             typed_text = st.text_area(
                 "hidden_label",
-                height=300,
+                value=st.session_state.get("preset_text", ""),
+                height=250,
                 placeholder="Paste chapters, notes, or transcript text here to begin...",
                 label_visibility="collapsed",
             )
@@ -1414,16 +1635,24 @@ elif menu == "Generate Quiz":
         ctrl_col1, ctrl_col2, ctrl_col3 = st.columns(3)
         with ctrl_col1:
             st.markdown("**🔢 Total Questions**")
-            question_count = st.slider("questions_slider", min_value=3, max_value=25, value=8, label_visibility="collapsed")
+            cur_count = int(st.session_state.get("preset_count", 5))
+            question_count = st.slider("questions_slider", min_value=3, max_value=20, value=min(max(cur_count, 3), 20), label_visibility="collapsed")
             st.caption(f"Target: {question_count} items")
         with ctrl_col2:
             st.markdown("**🎯 Complexity**")
-            difficulty = st.selectbox("diff_select", ["Easy", "Medium", "Hard"], label_visibility="collapsed")
+            diff_options = ["Easy", "Medium", "Hard"]
+            def_diff = st.session_state.get("preset_diff", "Easy")
+            diff_idx = diff_options.index(def_diff) if def_diff in diff_options else 0
+            difficulty = st.selectbox("diff_select", diff_options, index=diff_idx, label_visibility="collapsed")
         with ctrl_col3:
             st.markdown("**📋 Question Mode**")
+            type_options = ["Multiple Choice Questions (MCQ)", "True/False", "Short Answer"]
+            def_type = st.session_state.get("preset_type", "Multiple Choice Questions (MCQ)")
+            type_idx = type_options.index(def_type) if def_type in type_options else 0
             question_type = st.selectbox(
                 "type_select",
-                ["Multiple Choice Questions (MCQ)", "True/False", "Short Answer"],
+                type_options,
+                index=type_idx,
                 label_visibility="collapsed",
             )
         st.markdown("</div>", unsafe_allow_html=True)
@@ -1481,6 +1710,7 @@ elif menu == "Generate Quiz":
                     st.session_state.answers = {}
                     st.session_state.quiz_submitted = False
                     st.session_state.current_q = 0
+                    st.session_state.quiz_start_time = time.time()
                     progress.progress(100)
                     status_box.update(label="Quiz Ready!", state="complete", expanded=False)
                     st.success(f"Quiz generated successfully. Heading to 'Take Quiz'!")
@@ -1488,197 +1718,365 @@ elif menu == "Generate Quiz":
                     st.rerun()
 
 elif menu == "Take Quiz":
-    st.header("Take Your Quiz")
-    st.write("Answer step-by-step and submit at the end.")
-
     quiz = load_questions()
     questions = quiz["questions"] if isinstance(quiz, dict) else quiz
     quiz_meta = quiz.get("metadata", {}) if isinstance(quiz, dict) else {}
 
     if not questions:
-        st.info("No quiz available. Generate one first.")
+        st.markdown("""
+            <div class="card" style="text-align: center; padding: 3rem 2rem;">
+                <div style="font-size: 3.5rem; margin-bottom: 1rem;">🎯</div>
+                <h2 style="margin-bottom: 0.5rem;">No Active Quiz Found</h2>
+                <p style="color: var(--muted); max-width: 500px; margin: 0 auto 1.5rem; font-size: 1.05rem;">
+                    Ready to test your knowledge? Generate a quiz from your notes, PDFs, or pick one of our 1-click Quick Start demo topics!
+                </p>
+            </div>
+        """, unsafe_allow_html=True)
+        if st.button("✨ Go to Quiz Generator", type="primary", use_container_width=True):
+            st.session_state.menu_selection = "Generate Quiz"
+            st.rerun()
+
+    elif st.session_state.get("quiz_submitted", False):
+        # -------------------------------------------------------------
+        # 🏆 CELEBRATORY RESULT & PERFORMANCE DASHBOARD
+        # -------------------------------------------------------------
+        res = st.session_state.get("last_result", {})
+        score = res.get("score", 0)
+        total = res.get("total", len(questions))
+        percent = res.get("percent", 0.0)
+        details = res.get("details", [])
+        time_taken_str = res.get("time_taken", "N/A")
+
+        if percent >= 90:
+            badge_title = "🏆 QUIZ MASTER"
+            badge_sub = "Exceptional mastery! You conquered this quiz with flying colors!"
+        elif percent >= 75:
+            badge_title = "🥇 QUIZ CHAMPION"
+            badge_sub = "Fantastic performance! Strong comprehension and sharp accuracy."
+        elif percent >= 50:
+            badge_title = "🥈 RISING STAR"
+            badge_sub = "Good job! A quick review will make your knowledge rock solid."
+        else:
+            badge_title = "💡 KNOWLEDGE SEEKER"
+            badge_sub = "Every challenge is a learning milestone. Review the answers and retake!"
+
+        stars = "⭐" * max(1, int(percent // 20))
+
+        st.markdown(f"""
+            <div class="score-card">
+                <div style="font-size: 3.8rem; margin-bottom: 0.5rem;" class="result-trophy">{"🏆" if percent >= 75 else "🎯"}</div>
+                <div style="font-size: 1.8rem; margin-bottom: 0.5rem;">{stars}</div>
+                <div style="display: inline-block; background: rgba(255,255,255,0.2); backdrop-filter: blur(10px); padding: 6px 20px; border-radius: 20px; font-weight: 800; font-size: 0.95rem; letter-spacing: 1.5px; margin-bottom: 15px; border: 1px solid rgba(255,255,255,0.3);">
+                    {badge_title}
+                </div>
+                <h1 style="font-size: 4.2rem; font-weight: 800; margin: 0; color: white !important;">{percent}%</h1>
+                <p style="font-size: 1.3rem; font-weight: 600; margin: 8px 0 0 0; color: rgba(255,255,255,0.95) !important;">
+                    {score} of {total} Questions Correct
+                </p>
+                <p style="font-size: 1rem; opacity: 0.9; margin-top: 8px; color: white !important;">{badge_sub}</p>
+            </div>
+        """, unsafe_allow_html=True)
+
+        # 4-Card Performance HUD
+        m_col1, m_col2, m_col3, m_col4 = st.columns(4)
+        with m_col1:
+            st.markdown(f"""
+                <div class="metric-badge-card">
+                    <div class="metric-val">{score}/{total}</div>
+                    <div class="metric-lbl">Total Score</div>
+                </div>
+            """, unsafe_allow_html=True)
+        with m_col2:
+            st.markdown(f"""
+                <div class="metric-badge-card">
+                    <div class="metric-val">{percent}%</div>
+                    <div class="metric-lbl">Accuracy Rate</div>
+                </div>
+            """, unsafe_allow_html=True)
+        with m_col3:
+            st.markdown(f"""
+                <div class="metric-badge-card">
+                    <div class="metric-val">{time_taken_str}</div>
+                    <div class="metric-lbl">Time Elapsed</div>
+                </div>
+            """, unsafe_allow_html=True)
+        with m_col4:
+            passed = percent >= 60
+            st.markdown(f"""
+                <div class="metric-badge-card">
+                    <div class="metric-val" style="color: {'#10b981' if passed else '#f59e0b'};">{'PASSED 🎉' if passed else 'REVIEW 📚'}</div>
+                    <div class="metric-lbl">Status</div>
+                </div>
+            """, unsafe_allow_html=True)
+
+        st.markdown("<div style='height: 1.8rem;'></div>", unsafe_allow_html=True)
+
+        # Action Buttons
+        act_col1, act_col2, act_col3 = st.columns(3)
+        with act_col1:
+            if st.button("🔄 Retake This Quiz", use_container_width=True, type="primary"):
+                st.session_state.answers = {}
+                st.session_state.current_q = 0
+                st.session_state.quiz_submitted = False
+                st.session_state.quiz_start_time = time.time()
+                st.rerun()
+        with act_col2:
+            if st.button("✨ Create Another Quiz", use_container_width=True):
+                st.session_state.answers = {}
+                st.session_state.current_q = 0
+                st.session_state.quiz_submitted = False
+                st.session_state.menu_selection = "Generate Quiz"
+                st.rerun()
+        with act_col3:
+            df_results = pd.DataFrame(details)
+            csv = df_results.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                "📥 Export Results (CSV)",
+                csv,
+                f"quiz_result_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                "text/csv",
+                use_container_width=True
+            )
+
+        st.divider()
+
+        # Detailed Question Review
+        st.markdown("### 📋 Detailed Question Review")
+        for item in details:
+            is_cor = item["is_correct"]
+            box_bg = "rgba(16, 185, 129, 0.05)" if is_cor else "rgba(239, 68, 68, 0.05)"
+            border_c = "#10b981" if is_cor else "#ef4444"
+            icon = "✅" if is_cor else "❌"
+            status_text = "Correct" if is_cor else "Incorrect"
+
+            st.markdown(f"""
+                <div class="card" style="border-left: 5px solid {border_c}; background: {box_bg}; padding: 1.25rem 1.6rem; margin-bottom: 1rem;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.6rem;">
+                        <span style="font-weight: 800; font-size: 0.95rem; color: var(--ink);">Question {item['index']}</span>
+                        <span style="font-weight: 700; font-size: 0.88rem; color: {border_c};">{icon} {status_text}</span>
+                    </div>
+                    <div style="font-size: 1.12rem; font-weight: 700; color: var(--ink); margin-bottom: 0.9rem; line-height: 1.4;">{item['question']}</div>
+                    <div style="display: flex; gap: 24px; flex-wrap: wrap; font-size: 0.96rem;">
+                        <div><strong>Your Answer:</strong> <span style="color: {'#15803d' if is_cor else '#b91c1c'}; font-weight: 700;">{item['user_answer'] or 'Not answered'}</span></div>
+                        {f"<div><strong>Correct Answer:</strong> <span style='color: #15803d; font-weight: 700;'>{item['correct_answer']}</span></div>" if not is_cor else ""}
+                    </div>
+                </div>
+            """, unsafe_allow_html=True)
+
     else:
-        st.caption(
-            f"Questions: {len(questions)} | Type: {quiz_meta.get('question_type', 'N/A')} | Difficulty: {quiz_meta.get('difficulty', 'N/A')}"
-        )
+        # -------------------------------------------------------------
+        # 🎮 ACTIVE QUIZ EXPERIENCE (REAL QUIZZER APP)
+        # -------------------------------------------------------------
+        if st.session_state.quiz_start_time is None:
+            st.session_state.quiz_start_time = time.time()
 
-        # Ensure state exists
-        if "current_q" not in st.session_state:
+        if st.session_state.current_q >= len(questions):
             st.session_state.current_q = 0
-
-        if "answers" not in st.session_state:
-            st.session_state.answers = {}
-
         idx = st.session_state.current_q
         question = questions[idx]
 
+        # Calculate Elapsed Time
+        elapsed_sec = int(time.time() - st.session_state.quiz_start_time)
+        mins, secs = divmod(elapsed_sec, 60)
+        time_display = f"{mins:02d}:{secs:02d}"
 
-        # Progress
-        st.markdown(f"### 📝 Question {idx + 1} / {len(questions)}")
-        st.progress((idx + 1) / len(questions))
+        # Top HUD Bar
+        hud_col1, hud_col2 = st.columns([3, 1])
+        with hud_col1:
+            diff_level = question.get('difficulty', quiz_meta.get('difficulty', 'Normal')).title()
+            diff_icon = "🟢" if diff_level == "Easy" else ("🟡" if diff_level == "Medium" else "🔴")
+            q_type_short = "MCQ" if "MCQ" in question.get("type", "") else question.get("type", "")
 
-        st.divider()
+            st.markdown(f"""
+                <div class="quiz-hud">
+                    <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+                        <span class="hud-pill">📝 Question {idx + 1} of {len(questions)}</span>
+                        <span class="hud-pill">{diff_icon} {diff_level}</span>
+                        <span class="hud-pill">🏷️ {q_type_short}</span>
+                    </div>
+                    <div class="hud-pill" style="color: var(--brand); font-family: monospace; font-size: 0.95rem;">
+                        ⏱️ {time_display}
+                    </div>
+                </div>
+            """, unsafe_allow_html=True)
+
+        with hud_col2:
+            st.session_state.quiz_mode = st.selectbox(
+                "Mode",
+                ["Exam Mode", "⚡ Arcade Practice"],
+                index=0 if st.session_state.quiz_mode == "Exam Mode" else 1,
+                label_visibility="collapsed"
+            )
+
+        # Progress bar
+        completed_count = sum(1 for k, v in st.session_state.answers.items() if str(v).strip() != "")
+        st.progress(completed_count / len(questions))
+
+        # -------------------------------------------------------------
+        # 🔢 QUESTION STEPPER NAVIGATION
+        # -------------------------------------------------------------
+        st.markdown("<div style='margin: 8px 0 18px 0;' class='stepper-row'>", unsafe_allow_html=True)
+        num_q = len(questions)
+        cols_per_row = 10 if num_q >= 10 else num_q
+        rows = math.ceil(num_q / cols_per_row)
+        for r in range(rows):
+            start_q = r * cols_per_row
+            end_q = min(start_q + cols_per_row, num_q)
+            cols = st.columns(end_q - start_q)
+            for c_idx, q_idx in enumerate(range(start_q, end_q)):
+                is_curr = (q_idx == idx)
+                is_ans = (q_idx in st.session_state.answers and str(st.session_state.answers[q_idx]).strip() != "")
+                label = f"{q_idx + 1} ✓" if is_ans else f"{q_idx + 1}"
+                with cols[c_idx]:
+                    if st.button(label, key=f"stepper_{q_idx}", type="primary" if is_curr else "secondary", use_container_width=True):
+                        st.session_state.current_q = q_idx
+                        st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        # -------------------------------------------------------------
+        # 📋 CURRENT QUESTION CARD
+        # -------------------------------------------------------------
         with st.container():
-            st.markdown('<div class="card quiz-question-card">', unsafe_allow_html=True)
-            st.markdown(f"<div style='font-size:1.25rem; font-weight:700; margin-bottom:1.5rem; color:var(--ink);'>{question['question']}</div>", unsafe_allow_html=True)
-            
-            # Question Input logic based on type
-            q_type = question["type"]
+            st.markdown('<div class="card quiz-question-card" style="box-shadow: 0 10px 30px rgba(0,109,119,0.07); border-radius: 20px; padding: 2.2rem;">', unsafe_allow_html=True)
+            st.markdown(f"<div style='font-size: 1.35rem; font-weight: 700; margin-bottom: 1.5rem; color: var(--ink); line-height: 1.45;'>{question['question']}</div>", unsafe_allow_html=True)
+
+            q_type = question.get("type", "MCQ")
+            st.markdown('<div class="quiz-options-box">', unsafe_allow_html=True)
+
             if q_type in ["Multiple Choice Questions (MCQ)", "MCQ"]:
                 current_answer = st.session_state.answers.get(idx)
+                raw_options = question.get("options", [])
                 try:
-                    index = question["options"].index(current_answer) if current_answer is not None else None
-                except ValueError:
-                    index = None
-                
+                    chosen_idx = raw_options.index(current_answer) if current_answer in raw_options else None
+                except (ValueError, TypeError):
+                    chosen_idx = None
+
                 choice = st.radio(
-                    "Select the correct option:",
-                    question["options"],
-                    index=index,
+                    "Options",
+                    raw_options,
+                    index=chosen_idx,
                     key=f"q_radio_{idx}",
                     label_visibility="collapsed"
                 )
-                st.session_state.answers[idx] = choice
-            
+                if choice:
+                    st.session_state.answers[idx] = choice
+
             elif q_type == "True/False":
                 current_answer = st.session_state.answers.get(idx)
-                index = None
-                if current_answer == "True":
-                    index = 0
-                elif current_answer == "False":
-                    index = 1
-                
+                tf_options = ["True", "False"]
+                chosen_idx = tf_options.index(current_answer) if current_answer in tf_options else None
+
                 choice = st.radio(
-                    "True or False?",
-                    ["True", "False"],
-                    index=index,
+                    "True or False",
+                    tf_options,
+                    index=chosen_idx,
                     key=f"q_tf_{idx}",
                     label_visibility="collapsed"
                 )
-                st.session_state.answers[idx] = choice
-            
+                if choice:
+                    st.session_state.answers[idx] = choice
+
             elif q_type == "Short Answer":
                 ans = st.text_area(
-                    "Your Answer:",
+                    "Your Answer",
                     value=st.session_state.answers.get(idx, ""),
                     key=f"q_sa_{idx}",
-                    placeholder="Type your explanation here..."
+                    placeholder="Type your explanation or response here...",
+                    label_visibility="collapsed"
                 )
-                st.session_state.answers[idx] = ans
+                if ans:
+                    st.session_state.answers[idx] = ans
+
             st.markdown('</div>', unsafe_allow_html=True)
 
-        # Navigation
-        col1, col2 = st.columns(2)
+            # Instant Practice Mode Validation
+            if st.session_state.quiz_mode == "⚡ Arcade Practice":
+                user_curr_ans = st.session_state.answers.get(idx)
+                if user_curr_ans:
+                    is_instant_correct = evaluate_answer(question, user_curr_ans)
+                    if is_instant_correct:
+                        st.success(f"🎉 **Correct!** Great instinct! (+100 XP)")
+                    else:
+                        st.error(f"❌ **Incorrect.** The correct answer is: **{question['answer']}**")
 
-        with col1:
-            if st.button("⬅️ Previous"):
+            st.markdown('</div>', unsafe_allow_html=True)
+
+        # -------------------------------------------------------------
+        # 🎮 BOTTOM CONTROLS & NAVIGATION
+        # -------------------------------------------------------------
+        nav_col1, nav_col2, nav_col3 = st.columns([1, 1, 1.2])
+
+        with nav_col1:
+            if st.button("⬅️ Previous", use_container_width=True, disabled=(idx == 0)):
                 if idx > 0:
                     st.session_state.current_q -= 1
                     st.rerun()
 
-        with col2:
+        with nav_col2:
             if idx < len(questions) - 1:
-                if st.button("Next ➡️"):
+                if st.button("Next ➡️", use_container_width=True, type="primary"):
                     st.session_state.current_q += 1
                     st.rerun()
             else:
-                submit_button = st.button("🚀 Submit Quiz", type="primary")
+                st.caption("🏁 Last question reached")
 
-                score = 0
-                details = []
-                weak_areas = []
-                difficulty_totals = defaultdict(lambda: {"correct": 0, "total": 0})
+        with nav_col3:
+            submit_label = "🚀 Submit Quiz"
+            if st.button(submit_label, type="primary", use_container_width=True):
+                with st.spinner("Grading your responses with AI..."):
+                    score = 0
+                    details = []
+                    difficulty_totals = defaultdict(lambda: {"correct": 0, "total": 0})
 
-                for i, q in enumerate(questions):
-                    user_answer = st.session_state.answers.get(i)
-                    correct = evaluate_answer(q, user_answer)
-                    score += int(correct)
+                    for i, q in enumerate(questions):
+                        user_ans = st.session_state.answers.get(i)
+                        correct = evaluate_answer(q, user_ans)
+                        score += int(correct)
 
-                    diff = q.get("difficulty", "unknown")
-                    difficulty_totals[diff]["total"] += 1
-                    difficulty_totals[diff]["correct"] += int(correct)
+                        diff = q.get("difficulty", "unknown").lower()
+                        difficulty_totals[diff]["total"] += 1
+                        difficulty_totals[diff]["correct"] += int(correct)
 
-                    details.append({
-                        "index": i + 1,
-                        "question": q["question"],
-                        "user_answer": user_answer,
-                        "correct_answer": q["answer"],
-                        "is_correct": correct,
-                    })
+                        details.append({
+                            "index": i + 1,
+                            "question": q["question"],
+                            "user_answer": user_ans,
+                            "correct_answer": q["answer"],
+                            "is_correct": correct,
+                        })
 
-                percent = round((score / len(questions)) * 100, 2)
+                    percent = round((score / len(questions)) * 100, 1)
 
-                save_attempt(
-                    score=score,
-                    total=len(questions),
-                    user_name=candidate.strip() or "Guest",
-                    details=details,
-                    difficulty_breakdown=dict(difficulty_totals),
-                )
-
-                # Reset
-                st.session_state.current_q = 0
-
-                # Styled Score Card
-                stars = "⭐" * (int(percent // 20))
-                st.markdown(f"""
-                    <div class="score-card">
-                        <div class="stars">{stars}</div>
-                        <p>YOUR FINAL SCORE</p>
-                        <h1>{percent}%</h1>
-                        <p>{score} out of {len(questions)} correct</p>
-                    </div>
-                """, unsafe_allow_html=True)
-
-                # Action Buttons
-                btn_col1, btn_col2 = st.columns(2)
-                with btn_col1:
-                    df_results = pd.DataFrame(details)
-                    csv = df_results.to_csv(index=False).encode('utf-8')
-                    st.download_button(
-                        "📥 Download Result (CSV)",
-                        csv,
-                        f"quiz_result_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                        "text/csv",
-                        use_container_width=True
+                    # Save to database
+                    save_attempt(
+                        score=score,
+                        total=len(questions),
+                        user_name=candidate.strip() or "Guest",
+                        details=details,
+                        difficulty_breakdown=dict(difficulty_totals),
                     )
-                with btn_col2:
-                    if st.button("🔄 Retake Quiz", use_container_width=True):
-                        st.session_state.answers = {}
-                        st.session_state.current_q = 0
-                        st.rerun()
 
-                # Feedback
-                if percent >= 80:
-                    show_confetti()
-                    play_sound("finish")
-                    st.success("🔥 Excellent performance! You're a pro!")
-                elif percent >= 50:
-                    st.info("👍 Good job! With a bit more practice, you'll be perfect.")
-                else:
-                    st.warning("⚠️ Keep pushing! Review the material and try again.")
+                    # Calculate total time
+                    total_elapsed = int(time.time() - (st.session_state.quiz_start_time or time.time()))
+                    m, s = divmod(total_elapsed, 60)
+                    time_str = f"{m}m {s}s"
 
-                # Weak Areas
-                for diff, stats in difficulty_totals.items():
-                    if stats["correct"] / stats["total"] < 0.5:
-                        weak_areas.append(diff.title())
+                    # Save result state
+                    st.session_state.last_result = {
+                        "score": score,
+                        "total": len(questions),
+                        "percent": percent,
+                        "details": details,
+                        "difficulty_breakdown": dict(difficulty_totals),
+                        "time_taken": time_str
+                    }
+                    st.session_state.quiz_submitted = True
 
-                if weak_areas:
-                    st.warning(f"⚠️ Weak in: {', '.join(weak_areas)}")
+                    if percent >= 75:
+                        show_confetti()
+                        play_sound("finish")
 
-                # Review Answers
-                with st.expander("📊 Review Answers", expanded=True):
-                    for item in details:
-                        if item["is_correct"]:
-                            st.success(f"Q{item['index']} - Correct ✅")
-                        else:
-                            st.error(f"Q{item['index']} - Incorrect ❌")
-
-                        st.write(f"Your answer: {item['user_answer']}")
-                        if not item["is_correct"]:
-                            st.write(f"Correct answer: {item['correct_answer']}")
-
-                        st.divider()
+                    st.rerun()
 
 elif menu == "Analytics Dashboard":
     st.subheader("Quiz Analytics Dashboard")

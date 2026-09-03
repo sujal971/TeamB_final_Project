@@ -70,7 +70,7 @@ def _hash_password(password):
     return hashlib.sha256(password.encode("utf-8")).hexdigest()
 
 
-def register_user(username, password, mobile):
+def register_user(username, password, mobile=None):
     cleaned = (username or "").strip()
 
     with _connect() as connection:
@@ -110,6 +110,10 @@ def authenticate_user(username, password):
             return False, None
 
         return True, row["username"]
+
+
+
+
 
 
 def save_questions(questions, source_name="Uploaded File", metadata=None):
